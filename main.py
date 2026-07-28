@@ -1,262 +1,397 @@
+"""
+Modern Calculator Application
+Main entry point with menu bar and application window.
+"""
+
 import sys
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, 
-                             QGridLayout, QPushButton, QLineEdit)
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QKeyEvent
+from pathlib import Path
+
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QMenuBar, QMenu,
+                             QAction, QMessageBox, QFileDialog)
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QIcon, QKeySequence
+
+from calculator_widget import CalculatorWidget
+from language_dialog import show_language_dialog
+from settings_manager import get_settings
+from translations import set_language, t, get_current_language, Language
+from styles import get_theme
+from config import WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT
 
 
-class Calculator(QWidget):
-    """Современный калькулятор с поддержкой клавиатуры и истории."""
-    
+class CalculatorWindow(QMainWindow):
+    """Main calculator window with menu bar."""
+
     def __init__(self):
         super().__init__()
-        self.current_expression = ""
-        self.history = []
-        self.initUI()
 
-    def initUI(self):
-        """Инициализация пользовательского интерфейса."""
-        self.setWindowTitle('Калькулятор')
-        self.setFixedSize(350, 450)
+        self.settings = get_settings()
+        self.theme = get_theme()
 
-        # Основной вертикальный макет
-        main_layout = QVBoxLayout()
-        self.setLayout(main_layout)
+        # Check if first launch (show language dialog)
+        if not Path(self.settings.config_file).exists():
+            self._show_language_selection()
+        else:
+            # Load saved language
+            saved_lang = self.settings.get_language()
+            set_language(saved_lang)
 
-        # Создание дисплея
-        self.display = self._create_display()
-        main_layout.addWidget(self.display)
+        # Load theme
+        saved_theme = self.settings.get_theme()
+        self.theme.set_theme(saved_theme)
 
-        # Создание сетки кнопок
-        button_grid = self._create_button_grid()
-        main_layout.addLayout(button_grid)
+        self._init_ui()
+        self._create_menu_bar()
+        self._apply_shortcuts()
 
-    def _create_display(self) -> QLineEdit:
-        """Создание и настройка дисплея калькулятора."""
-        display = QLineEdit()
-        display.setAlignment(Qt.AlignRight)
-        display.setFont(QFont('Arial', 24))
-        display.setReadOnly(True)
-        display.setMinimumHeight(60)
-        display.setPlaceholderText("0")
-        display.setStyleSheet("""
-            QLineEdit {
-                background-color: #f0f0f0;
-                border: 2px solid #cccccc;
-                border-radius: 5px;
+        # Apply initial theme
+        QTimer.singleShot(100, self._apply_theme)
+
+    def _init_ui(self):
+        """Initialize main window UI."""
+        self.setWindowTitle(t("app_title"))
+        self.setMinimumSize(WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT)
+
+        # Try to set window icon (if exists)
+        icon_path = Path(__file__).parent / "icon.png"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
+
+        # Create central widget
+        self.calculator = CalculatorWidget()
+        self.setCentralWidget(self.calculator)
+
+        # Connect theme changes
+        self.calculator.theme_changed.connect(self._apply_theme)
+
+        # Restore window size
+        width = self.settings.settings.window_width
+        height = self.settings.settings.window_height
+        self.resize(width, height)
+
+    def _create_menu_bar(self):
+        """Create application menu bar."""
+        menubar = self.menuBar()
+
+        # File menu
+        file_menu = menubar.addMenu(t("menu_file"))
+
+        # Clear history action
+        clear_history_action = QAction(t("history_clear"), self)
+        clear_history_action.setShortcut(QKeySequence("Ctrl+Shift+Del"))
+        clear_history_action.triggered.connect(self._clear_history)
+        file_menu.addAction(clear_history_action)
+
+        file_menu.addSeparator()
+
+        # Export history action
+        export_action = QAction("📥 " + "Export History", self)
+        export_action.setShortcut(QKeySequence("Ctrl+E"))
+        export_action.triggered.connect(self._export_history)
+        file_menu.addAction(export_action)
+
+        file_menu.addSeparator()
+
+        # Exit action
+        exit_action = QAction(t("menu_exit"), self)
+        exit_action.setShortcut(QKeySequence("Ctrl+Q"))
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        # Edit menu
+        edit_menu = menubar.addMenu(t("menu_edit"))
+
+        # Copy action
+        copy_action = QAction(t("menu_copy"), self)
+        copy_action.setShortcut(QKeySequence.Copy)
+        copy_action.triggered.connect(self._copy_result)
+        edit_menu.addAction(copy_action)
+
+        # View menu
+        view_menu = menubar.addMenu(t("menu_view"))
+
+        # Toggle history
+        history_action = QAction(t("menu_history"), self)
+        history_action.setShortcut(QKeySequence("Ctrl+H"))
+        history_action.setCheckable(True)
+        history_action.setChecked(True)
+        history_action.triggered.connect(self._toggle_history)
+        view_menu.addAction(history_action)
+
+        view_menu.addSeparator()
+
+        # Toggle scientific mode
+        scientific_action = QAction(t("setting_scientific"), self)
+        scientific_action.setShortcut(QKeySequence("Ctrl+S"))
+        scientific_action.setCheckable(True)
+        scientific_action.setChecked(self.settings.scientific_mode)
+        scientific_action.triggered.connect(self._toggle_scientific)
+        view_menu.addAction(scientific_action)
+
+        view_menu.addSeparator()
+
+        # Theme submenu
+        theme_menu = view_menu.addMenu(t("setting_theme"))
+
+        light_action = QAction(t("theme_light"), self)
+        light_action.setCheckable(True)
+        light_action.setChecked(self.settings.get_theme() == "light")
+        light_action.triggered.connect(lambda: self._set_theme("light"))
+        theme_menu.addAction(light_action)
+
+        dark_action = QAction(t("theme_dark"), self)
+        dark_action.setCheckable(True)
+        dark_action.setChecked(self.settings.get_theme() == "dark")
+        dark_action.triggered.connect(lambda: self._set_theme("dark"))
+        theme_menu.addAction(dark_action)
+
+        # Language submenu
+        lang_menu = view_menu.addMenu(t("language_select"))
+
+        en_action = QAction("🇬🇧 English", self)
+        en_action.setCheckable(True)
+        en_action.setChecked(get_current_language() == Language.ENGLISH)
+        en_action.triggered.connect(lambda: self._set_language(Language.ENGLISH))
+        lang_menu.addAction(en_action)
+
+        ru_action = QAction("🇷🇺 Русский", self)
+        ru_action.setCheckable(True)
+        ru_action.setChecked(get_current_language() == Language.RUSSIAN)
+        ru_action.triggered.connect(lambda: self._set_language(Language.RUSSIAN))
+        lang_menu.addAction(ru_action)
+
+        # Help menu
+        help_menu = menubar.addMenu(t("menu_help"))
+
+        # Keyboard shortcuts
+        shortcuts_action = QAction("⌨️ " + "Keyboard Shortcuts", self)
+        shortcuts_action.setShortcut(QKeySequence("F1"))
+        shortcuts_action.triggered.connect(self._show_shortcuts)
+        help_menu.addAction(shortcuts_action)
+
+        help_menu.addSeparator()
+
+        # About action
+        about_action = QAction(t("menu_about"), self)
+        about_action.triggered.connect(self._show_about)
+        help_menu.addAction(about_action)
+
+    def _apply_shortcuts(self):
+        """Apply global keyboard shortcuts."""
+        # Ctrl+T for theme toggle
+        pass  # Already handled in calculator_widget
+
+    def _show_language_selection(self):
+        """Show language selection dialog on first launch."""
+        selected_lang = show_language_dialog(self)
+        set_language(selected_lang)
+        self.settings.set_language(selected_lang)
+
+    def _apply_theme(self):
+        """Apply theme to window."""
+        self.setStyleSheet(self.theme.get_window_style())
+
+        # Update menu bar style
+        menubar_style = f"""
+            QMenuBar {{
+                background-color: {self.theme.current_theme.window_bg};
+                color: {self.theme.current_theme.display_text};
                 padding: 5px;
-                color: #333333;
-            }
-        """)
-        return display
-
-    def _create_button_grid(self) -> QGridLayout:
-        """Создание сетки кнопок калькулятора."""
-        grid = QGridLayout()
-        grid.setSpacing(5)
-
-        # Определение кнопок с их типами
-        button_config = [
-            ('7', 'number'), ('8', 'number'), ('9', 'number'), ('/', 'operator'),
-            ('4', 'number'), ('5', 'number'), ('6', 'number'), ('*', 'operator'),
-            ('1', 'number'), ('2', 'number'), ('3', 'number'), ('-', 'operator'),
-            ('C', 'clear'),  ('0', 'number'), ('=', 'equals'), ('+', 'operator')
-        ]
-
-        # Создание кнопок
-        for index, (text, btn_type) in enumerate(button_config):
-            row = index // 4
-            col = index % 4
-            
-            button = self._create_button(text, btn_type)
-            grid.addWidget(button, row, col)
-
-        # Делаем кнопки растягивающимися
-        for i in range(4):
-            grid.setRowStretch(i, 1)
-            grid.setColumnStretch(i, 1)
-
-        return grid
-
-    def _create_button(self, text: str, btn_type: str) -> QPushButton:
-        """Создание отдельной кнопки с соответствующим стилем."""
-        button = QPushButton(text)
-        button.setFont(QFont('Arial', 18, QFont.Bold))
-        button.setMinimumSize(70, 70)
-        button.setCursor(Qt.PointingHandCursor)
-        
-        # Применение стилей в зависимости от типа
-        styles = {
-            'operator': self._get_operator_style(),
-            'equals': self._get_operator_style(),
-            'clear': self._get_clear_style(),
-            'number': self._get_number_style()
-        }
-        
-        button.setStyleSheet(styles.get(btn_type, styles['number']))
-        button.clicked.connect(lambda: self._on_button_clicked(text))
-        
-        return button
-
-    @staticmethod
-    def _get_operator_style() -> str:
-        """Стиль для кнопок операций."""
-        return """
-            QPushButton {
-                background-color: #ff9800;
-                color: white;
-                border: none;
-                border-radius: 35px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #fb8c00;
-            }
-            QPushButton:pressed {
-                background-color: #e68a00;
-            }
+            }}
+            QMenuBar::item:selected {{
+                background-color: {self.theme.current_theme.button_number_hover};
+                border-radius: 4px;
+            }}
+            QMenu {{
+                background-color: {self.theme.current_theme.display_bg};
+                color: {self.theme.current_theme.display_text};
+                border: 1px solid {self.theme.current_theme.display_border};
+                padding: 5px;
+            }}
+            QMenu::item:selected {{
+                background-color: {self.theme.current_theme.button_number_hover};
+                border-radius: 4px;
+            }}
         """
+        self.menuBar().setStyleSheet(menubar_style)
 
-    @staticmethod
-    def _get_clear_style() -> str:
-        """Стиль для кнопки очистки."""
-        return """
-            QPushButton {
-                background-color: #f44336;
-                color: white;
-                border: none;
-                border-radius: 35px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #e53935;
-            }
-            QPushButton:pressed {
-                background-color: #d32f2f;
-            }
-        """
+    def _copy_result(self):
+        """Copy current result to clipboard."""
+        if self.calculator.display.copy_to_clipboard():
+            self.statusBar().showMessage(t("history_copied"), 2000)
 
-    @staticmethod
-    def _get_number_style() -> str:
-        """Стиль для кнопок с цифрами."""
-        return """
-            QPushButton {
-                background-color: #e0e0e0;
-                color: #333333;
-                border: none;
-                border-radius: 35px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #d5d5d5;
-            }
-            QPushButton:pressed {
-                background-color: #bdbdbd;
-            }
-        """
+    def _toggle_history(self):
+        """Toggle history panel visibility."""
+        self.calculator._toggle_history()
 
-    def _on_button_clicked(self, text: str):
-        """Обработка нажатий на кнопки."""
-        if text == 'C':
-            self._clear_display()
-        elif text == '=':
-            self._calculate_result()
+    def _toggle_scientific(self):
+        """Toggle scientific mode."""
+        is_scientific = self.settings.toggle_scientific_mode()
+
+        # Show restart message
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle(t("app_title"))
+
+        if get_current_language() == Language.RUSSIAN:
+            msg.setText("Перезапустите приложение для применения изменений")
         else:
-            self._append_to_display(text)
+            msg.setText("Please restart the application to apply changes")
 
-    def _clear_display(self):
-        """Очистка дисплея."""
-        self.current_expression = ""
-        self.display.clear()
+        msg.exec_()
 
-    def _append_to_display(self, text: str):
-        """Добавление символа к текущему выражению."""
-        current_text = self.display.text()
-        
-        # Если на дисплее ошибка, начинаем заново
-        if current_text in ['Ошибка', 'Деление на ноль']:
-            self.current_expression = text
-        else:
-            self.current_expression = current_text + text
-        
-        self.display.setText(self.current_expression)
+    def _set_theme(self, theme_name: str):
+        """Set application theme."""
+        self.settings.set_theme(theme_name)
+        self.theme.set_theme(theme_name)
+        self.calculator.apply_theme()
+        self._apply_theme()
 
-    def _calculate_result(self):
-        """Вычисление результата выражения."""
-        try:
-            expression = self.display.text()
-            if not expression:
-                return
-            
-            # Безопасное вычисление (только цифры и операторы)
-            # Защита от опасных команд
-            allowed_chars = set('0123456789+-*/(). ')
-            if not all(c in allowed_chars for c in expression):
-                raise ValueError("Недопустимые символы")
-            
-            result = eval(expression)
-            
-            # Проверка на деление на ноль
-            if result == float('inf') or result == float('-inf'):
-                raise ZeroDivisionError
-            
-            # Форматирование результата
-            if isinstance(result, float):
-                # Убираем лишние нули после точки
-                result = f"{result:.10g}"
-            else:
-                result = str(result)
-            
-            # Сохранение в историю
-            self.history.append(f"{expression} = {result}")
-            
-            self.display.setText(result)
-            self.current_expression = result
-            
-        except ZeroDivisionError:
-            self.display.setText('Деление на ноль')
-            self.current_expression = ""
-        except Exception:
-            self.display.setText('Ошибка')
-            self.current_expression = ""
+    def _set_language(self, language: Language):
+        """Set application language."""
+        set_language(language)
+        self.settings.set_language(language)
 
-    def keyPressEvent(self, event: QKeyEvent):
-        """Обработка нажатий клавиш."""
-        key = event.key()
-        text = event.text()
-        
-        # Цифры и операторы
-        if text in '0123456789+-*/.':
-            self._append_to_display(text)
-        # Enter или = для вычисления
-        elif key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Equal):
-            self._calculate_result()
-        # Escape или C для очистки
-        elif key in (Qt.Key_Escape, Qt.Key_C):
-            self._clear_display()
-        # Backspace для удаления последнего символа
-        elif key == Qt.Key_Backspace:
-            current = self.display.text()
-            if current not in ['Ошибка', 'Деление на ноль']:
-                self.current_expression = current[:-1]
-                self.display.setText(self.current_expression)
+        # Show restart message
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle("Language / Язык")
+        msg.setText(
+            "Please restart the application to apply language changes.\n\n"
+            "Пожалуйста, перезапустите приложение для применения изменений."
+        )
+        msg.exec_()
+
+    def _clear_history(self):
+        """Clear calculation history."""
+        reply = QMessageBox.question(
+            self,
+            t("history_clear"),
+            "Are you sure?" if get_current_language() == Language.ENGLISH
+            else "Вы уверены?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            self.calculator.history_panel.clear()
+            self.settings.clear_history()
+            self.statusBar().showMessage(t("history_clear"), 2000)
+
+    def _export_history(self):
+        """Export history to text file."""
+        history = self.calculator.history_panel.get_history()
+
+        if not history:
+            QMessageBox.information(self, t("app_title"), t("history_empty"))
+            return
+
+        # Open file dialog
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export History",
+            "calculator_history.txt",
+            "Text Files (*.txt);;All Files (*)"
+        )
+
+        if filename:
+            try:
+                with open(filename, 'w', encoding='utf-8') as f:
+                    f.write("Calculator History\n")
+                    f.write("=" * 50 + "\n\n")
+                    for item in history:
+                        f.write(item + "\n")
+
+                QMessageBox.information(
+                    self,
+                    t("app_title"),
+                    f"Exported to: {filename}"
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Error",
+                    f"Failed to export: {str(e)}"
+                )
+
+    def _show_shortcuts(self):
+        """Show keyboard shortcuts help."""
+        shortcuts_text = """
+        <h3>Keyboard Shortcuts</h3>
+        <table style="width:100%">
+        <tr><td><b>0-9, ., +, -, *, /</b></td><td>Number and operators input</td></tr>
+        <tr><td><b>Enter</b></td><td>Calculate result</td></tr>
+        <tr><td><b>Esc</b></td><td>Clear all</td></tr>
+        <tr><td><b>Backspace</b></td><td>Delete last character</td></tr>
+        <tr><td><b>Ctrl+C</b></td><td>Copy result</td></tr>
+        <tr><td><b>Ctrl+H</b></td><td>Toggle history</td></tr>
+        <tr><td><b>Ctrl+T</b></td><td>Toggle theme</td></tr>
+        <tr><td><b>Ctrl+Q</b></td><td>Quit application</td></tr>
+        </table>
+        """
+
+        if get_current_language() == Language.RUSSIAN:
+            shortcuts_text = """
+            <h3>Горячие клавиши</h3>
+            <table style="width:100%">
+            <tr><td><b>0-9, ., +, -, *, /</b></td><td>Ввод чисел и операторов</td></tr>
+            <tr><td><b>Enter</b></td><td>Вычислить результат</td></tr>
+            <tr><td><b>Esc</b></td><td>Очистить всё</td></tr>
+            <tr><td><b>Backspace</b></td><td>Удалить последний символ</td></tr>
+            <tr><td><b>Ctrl+C</b></td><td>Копировать результат</td></tr>
+            <tr><td><b>Ctrl+H</b></td><td>Показать/скрыть историю</td></tr>
+            <tr><td><b>Ctrl+T</b></td><td>Сменить тему</td></tr>
+            <tr><td><b>Ctrl+Q</b></td><td>Выход</td></tr>
+            </table>
+            """
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Shortcuts / Горячие клавиши")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(shortcuts_text)
+        msg.exec_()
+
+    def _show_about(self):
+        """Show about dialog."""
+        about_text = t("about_text")
+
+        QMessageBox.about(self, t("menu_about"), about_text)
+
+    def closeEvent(self, event):
+        """Handle window close event - save settings."""
+        # Save window size
+        self.settings.settings.window_width = self.width()
+        self.settings.settings.window_height = self.height()
+        self.settings.save()
+
+        event.accept()
 
 
 def main():
-    """Точка входа в приложение."""
+    """Application entry point."""
+    # Enable high DPI scaling
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+
     app = QApplication(sys.argv)
+
+    # Set application metadata
+    app.setApplicationName("Calculator")
+    app.setApplicationVersion("2.0")
+    app.setOrganizationName("ModernCalc")
+
+    # Use Fusion style for consistent look
     app.setStyle('Fusion')
-    
-    # Установка глобального стиля приложения
-    app.setStyleSheet("""
-        QWidget {
-            background-color: #fafafa;
-        }
-    """)
-    
-    calculator = Calculator()
-    calculator.show()
-    
+
+    # Create and show main window
+    window = CalculatorWindow()
+    window.show()
+
+    # Center window on screen
+    screen_geometry = app.desktop().screenGeometry()
+    x = (screen_geometry.width() - window.width()) // 2
+    y = (screen_geometry.height() - window.height()) // 2
+    window.move(x, y)
+
     sys.exit(app.exec_())
 
 
